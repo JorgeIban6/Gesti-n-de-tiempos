@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Registro de Tiempos — Control de Gestión</title>
+  <script>
+    (function () {
+      var t = "dark";
+      try {
+        t = localStorage.getItem("rt_theme") || t;
+        if (t !== "light" && t !== "dark") t = "dark";
+      } catch (e) {}
+      document.documentElement.setAttribute("data-theme", t);
+      document.documentElement.style.colorScheme = t;
+    })();
+  </script>
+  <link rel="stylesheet" href="/static/css/styles.css" />
+</head>
+<body>
+  <!-- BARRA SUPERIOR -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"></circle>
+          <polyline points="12 6 12 12 16 14"></polyline>
+        </svg>
+      </div>
+      <div class="brand-meta">
+        <span class="brand-title">Registro de Tiempos</span>
+        <span class="brand-tag">Control de Gestión · <span id="clockLabel" class="brand-clock">—</span></span>
+      </div>
+    </div>
+    <div class="top-actions">
+      <label class="field-inline">
+        <span>Vista:</span>
+        <select id="filterUser" aria-label="Filtrar por técnico">
+          <option value="__all__">Equipo completo</option>
+        </select>
+      </label>
+
+      <!-- BOTÓN CORREGIR TIEMPOS (INGENIEROS Y ADMINS) -->
+      <button type="button" id="btnOpenMisRegistros" class="btn btn-secondary" title="Corregir o editar mis tiempos registrados">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 20h9"></path>
+          <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
+        </svg>
+        Corregir Tiempos
+      </button>
+
+      <!-- BOTÓN EXPORTAR EXCEL -->
+      <button type="button" id="btnOpenExport" class="btn btn-excel" title="Exportar reportes a Excel">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+          <line x1="8" y1="13" x2="16" y2="13"></line>
+          <line x1="8" y1="17" x2="16" y2="17"></line>
+          <polyline points="10 9 9 9 8 9"></polyline>
+        </svg>
+        Exportar Excel
+      </button>
+
+      <button type="button" id="btnTheme" class="btn-theme" aria-label="Cambiar tema" title="Alternar tema">
+        <svg class="icon-sun" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="4"></circle>
+          <path d="M12 3v2M12 19v2M5 12H3M21 12h-2M6.2 6.2l1.4 1.4M16.4 16.4l1.4 1.4M6.2 17.8l1.4-1.4M16.4 7.6l1.4-1.4"></path>
+        </svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M19 13.5A7.5 7.5 0 1 1 10.5 5 6 6 0 0 0 19 13.5z"></path>
+        </svg>
+      </button>
+      <button type="button" id="btnRefresh" class="btn btn-primary" title="Actualizar datos">
+        <span class="btn-icon">↻</span> Actualizar
+      </button>
+    </div>
+  </header>
+
+  <!-- CONTENIDO PRINCIPAL -->
+  <main class="layout">
+    <!-- BARRA DE ESTADO -->
+    <section class="status-bar" id="statusBar" role="status">
+      <span id="statusDot" class="status-dot"></span>
+      <span id="statusText">Cargando base de datos…</span>
+      <span id="lastSync" class="muted"></span>
+    </section>
+
+    <!-- INDICADORES DEL DÍA (KPIS) -->
+    <section class="kpi-grid" id="kpiGrid" aria-label="Indicadores del día">
+      <article class="kpi"><span class="kpi-label">Meta hoy</span><div class="kpi-value">—<small>min</small></div></article>
+      <article class="kpi"><span class="kpi-label">Gestión</span><div class="kpi-value">—<small>min</small></div></article>
+      <article class="kpi kpi--ocio"><span class="kpi-label">Pausas/Otras</span><div class="kpi-value">—<small>min</small></div></article>
+      <article class="kpi kpi--neto"><span class="kpi-label">Neto real</span><div class="kpi-value">—<small>min</small></div></article>
+      <article class="kpi kpi--deficit"><span class="kpi-label">Déficit</span><div class="kpi-value">—<small>min</small></div></article>
+      <article class="kpi kpi--excedente"><span class="kpi-label">Excedente</span><div class="kpi-value">—<small>min</small></div></article>
+    </section>
+
+    <!-- GRÁFICAS SEMANALES -->
+    <section class="panel-grid">
+      <article class="panel">
+        <header class="panel-head">
+          <h2>Neto vs Meta — Semana</h2>
+          <p>Gestión + pausas frente a la jornada configurada</p>
+        </header>
+        <div class="chart-wrap"><canvas id="chartWeek" height="220"></canvas></div>
+      </article>
+      <article class="panel">
+        <header class="panel-head">
+          <h2>Casos gestionados — 7 días</h2>
+          <p>Casos únicos con tiempo registrado cada día</p>
+        </header>
+        <div class="chart-wrap chart-wrap--sm"><canvas id="chartCasos" height="220"></canvas></div>
+      </article>
+    </section>
+
+    <!-- BALANCE Y ACTIVIDAD RECIENTE -->
+    <section class="panel-grid panel-grid--3">
+      <article class="panel">
+        <header class="panel-head">
+          <h2>Balance semanal</h2>
+          <p>Banco de tiempo del periodo</p>
+        </header>
+        <ul class="stat-list" id="weekStats"></ul>
+      </article>
+      <article class="panel panel--wide">
+        <header class="panel-head">
+          <h2>Actividad reciente</h2>
+          <p>Últimos tickets, pausas y gestiones registradas</p>
+        </header>
+        <div class="table-scroll">
+          <table class="data-table" id="recentTable">
+            <thead>
+              <tr><th>Tipo</th><th>Técnico</th><th>Detalle</th><th>Min</th><th>Fecha</th><th>Hora</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+
+    <!-- FORMULARIO DE REGISTRO DE TIEMPOS -->
+    <section class="panel form-panel" id="registro">
+      <header class="panel-head">
+        <h2>Registrar tiempo</h2>
+        <p id="registroHint">Ingresa tu PIN confidencial para registrar automáticamente el tiempo en la base de datos.</p>
+      </header>
+      <form id="formRegistro" class="form" autocomplete="off">
+        <div class="form-row">
+          <label>Tipo de actividad<select id="regTipo" required></select></label>
+          <label>PIN<input type="password" id="regPin" inputmode="numeric" maxlength="8" placeholder="••••" required autocomplete="off" /></label>
+          <label>Minutos<input type="number" id="regMinutos" min="1" max="480" placeholder="30" required /></label>
+        </div>
+        <p id="pinUserHint" class="muted forms-help">Escribe tu PIN confidencial. El sistema detecta tu nombre de técnico de forma segura.</p>
+
+        <!-- CAMPOS PARA TICKET -->
+        <div class="form-row is-hidden" id="fieldsTicket">
+          <label>Nº Ticket<input type="text" id="regNumero" placeholder="1024" /></label>
+          <label class="grow">Nombre del caso<input type="text" id="regCaso" placeholder="Soporte API" /></label>
+          <label>Estado del caso
+            <select id="regEstado">
+              <option value="Abierto">Queda abierto</option>
+              <option value="Cerrado">Cerrar caso</option>
+            </select>
+          </label>
+        </div>
+        <div class="form-row is-hidden" id="fieldsTicketObs">
+          <label class="grow">Observaciones
+            <textarea id="regObservaciones" rows="2" placeholder="Detalle de la gestión, avances o resolución..."></textarea>
+          </label>
+        </div>
+
+        <!-- CRONÓMETRO -->
+        <aside class="cronometro is-hidden" id="cronometroBox" aria-label="Cronómetro de gestión">
+          <div class="crono-dial">
+            <svg viewBox="0 0 100 100" aria-hidden="true">
+              <g id="cronoTicks"></g>
+            </svg>
+            <div class="crono-center">
+              <strong id="cronoDisplay">0</strong>
+              <span>min</span>
+            </div>
+          </div>
+          <div class="crono-actions">
+            <button type="button" class="btn btn-secondary" id="btnCronoStart">Iniciar</button>
+            <button type="button" class="btn btn-secondary" id="btnCronoStop">Detener</button>
+            <button type="button" class="btn btn-secondary" id="btnCronoReset">Reiniciar</button>
+          </div>
+        </aside>
+
+        <!-- CAMPOS PARA PAUSAS / OTRAS -->
+        <div class="form-row is-hidden" id="fieldsAsunto">
+          <label class="grow">Nombre / Asunto
+            <input type="text" id="regAsunto" placeholder="Almuerzo, capacitación, pausa activa, daily..." list="asuntoHints" />
+            <datalist id="asuntoHints">
+              <option value="Almuerzo"></option>
+              <option value="Pausa activa"></option>
+              <option value="Daily / Reunión de equipo"></option>
+              <option value="Capacitación"></option>
+              <option value="Pausa corta"></option>
+            </datalist>
+          </label>
+        </div>
+
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary" id="btnSubmit">Guardar registro</button>
+          <p id="formMsg" class="form-msg" role="status"></p>
+        </div>
+      </form>
+    </section>
+
+    <!-- CONSULTA DE CASOS -->
+    <section class="panel form-panel" id="consultaCasos">
+      <header class="panel-head">
+        <h2>Consultar caso</h2>
+        <p>Busca por número o palabra clave para ver el historial y tiempo total invertido por todo el equipo.</p>
+      </header>
+      <form id="formConsulta" class="form" autocomplete="off">
+        <div class="form-row">
+          <label class="grow">Nº ticket o palabra clave
+            <input type="text" id="casoQuery" placeholder="Ej: 1024 o Facturación" />
+          </label>
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary" id="btnBuscarCaso">Buscar</button>
+          </div>
+        </div>
+        <p id="casoMsg" class="form-msg" role="status"></p>
+      </form>
+      <div id="casoResultado"></div>
+    </section>
+
+    <!-- PANEL DE ADMINISTRACIÓN (SOLO ADMINISTRADOR) -->
+    <section class="panel form-panel" id="adminPanel">
+      <header class="panel-head">
+        <h2>Administración del Sistema (Solo Administradores)</h2>
+        <p>Gestión completa de usuarios (Administrador, Ingeniero, Técnico), tipos de actividad, jornada laboral y configuración.</p>
+      </header>
+      <form id="formAdminLock" class="form admin-form" autocomplete="off">
+        <div class="form-row">
+          <label>PIN de Administrador
+            <input type="password" id="adminPin" inputmode="numeric" maxlength="8" placeholder="••••" required autocomplete="off" />
+          </label>
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary" id="btnAdminUnlock">Desbloquear Administración</button>
+            <button type="button" class="btn btn-secondary is-hidden" id="btnAdminLogout">Cerrar sesión admin</button>
+          </div>
+        </div>
+        <p id="adminMsg" class="form-msg" role="status"></p>
+      </form>
+      <div id="adminBody" class="is-hidden">
+        <div class="admin-tabs" id="adminTabs">
+          <button type="button" class="admin-tab is-on" data-tab="usuarios">Usuarios y Roles</button>
+          <button type="button" class="admin-tab" data-tab="tipos">Tipos de Actividad</button>
+          <button type="button" class="admin-tab" data-tab="tickets">Tickets</button>
+          <button type="button" class="admin-tab" data-tab="actividades">Actividades</button>
+          <button type="button" class="admin-tab" data-tab="jornada">Jornada</button>
+          <button type="button" class="admin-tab" data-tab="config">Configuración</button>
+        </div>
+        <form id="formAdminEdit" class="form admin-form" autocomplete="off"></form>
+        <div class="table-scroll admin-scroll">
+          <table class="data-table" id="adminTable"></table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- MODAL DE CORRECCIÓN DE TIEMPOS (INGENIEROS Y ADMINS) -->
+  <div id="modalMisRegistros" class="modal-backdrop is-hidden" role="dialog" aria-modal="true" aria-labelledby="modalMisRegTitle">
+    <div class="modal-box modal-box--large">
+      <div class="modal-head">
+        <h3 id="modalMisRegTitle">Corrección y Edición de Tiempos</h3>
+        <button type="button" id="btnCloseMisRegistros" class="btn-close" aria-label="Cerrar modal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <!-- PASO 1: VALIDACIÓN DE PIN INGENIERO / ADMIN -->
+        <div id="misRegAuthBox">
+          <p class="muted">Ingresa tu PIN confidencial para ver y corregir tus actividades registradas.</p>
+          <form id="formMisRegAuth" class="form-row" style="align-items:flex-end;">
+            <label>
+              <span>PIN de Ingeniero o Admin:</span>
+              <input type="password" id="misRegPin" inputmode="numeric" maxlength="8" placeholder="••••" required autocomplete="off" />
+            </label>
+            <button type="submit" class="btn btn-primary" id="btnMisRegAuth">Acceder a mis registros</button>
+          </form>
+          <p id="misRegAuthMsg" class="form-msg" role="status"></p>
+        </div>
+
+        <!-- PASO 2: LISTA DE REGISTROS EDITABLES -->
+        <div id="misRegContentBox" class="is-hidden">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
+            <span id="misRegUserBadge" class="badge badge-ticket" style="font-size:13px; padding:4px 10px;">Usuario</span>
+            <span class="muted" style="font-size:12.5px;">Haz clic en <strong>Editar</strong> en la fila que deseas corregir</span>
+          </div>
+
+          <!-- FORMULARIO DE EDICIÓN EN CALIENTE -->
+          <form id="formEditarRegistroActivo" class="form is-hidden" style="background:var(--bg-elev); padding:12px; border-radius:12px; border:1px solid var(--blue-bright); margin-bottom:14px;">
+            <input type="hidden" id="editRegTipo" />
+            <input type="hidden" id="editRegId" />
+            <div class="form-row">
+              <label>Minutos invertidos<input type="number" id="editRegMinutos" min="1" max="600" required /></label>
+              <label>Fecha<input type="date" id="editRegFecha" required /></label>
+              <label>Hora<input type="time" id="editRegHora" required /></label>
+              <label id="editFieldEstado">Estado
+                <select id="editRegEstado">
+                  <option value="Abierto">Abierto</option>
+                  <option value="Cerrado">Cerrado</option>
+                </select>
+              </label>
+            </div>
+            <div class="form-row" id="editFieldTicket">
+              <label>Nº Ticket<input type="text" id="editRegNumero" /></label>
+              <label class="grow">Nombre del caso<input type="text" id="editRegCaso" /></label>
+            </div>
+            <div class="form-row" id="editFieldActividad">
+              <label class="grow">Asunto / Detalle<input type="text" id="editRegAsunto" /></label>
+            </div>
+            <div class="form-row" id="editFieldObs">
+              <label class="grow">Observaciones<textarea id="editRegObservaciones" rows="2"></textarea></label>
+            </div>
+            <div class="form-actions" style="margin-top:6px;">
+              <button type="submit" class="btn btn-primary" id="btnGuardarEdicion">Guardar Cambios</button>
+              <button type="button" class="btn btn-secondary" id="btnCancelarEdicion">Cancelar</button>
+              <span id="editMsg" class="form-msg"></span>
+            </div>
+          </form>
+
+          <div class="table-scroll" style="max-height:300px;">
+            <table class="data-table" id="misRegTable">
+              <thead>
+                <tr><th>Tipo</th><th>Nº / Detalle</th><th>Minutos</th><th>Fecha</th><th>Hora</th><th>Acción</th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL DE EXPORTACIÓN A EXCEL -->
+  <div id="modalExport" class="modal-backdrop is-hidden" role="dialog" aria-modal="true" aria-labelledby="modalExportTitle">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h3 id="modalExportTitle">Exportar Reporte a Excel</h3>
+        <button type="button" id="btnCloseExport" class="btn-close" aria-label="Cerrar modal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="muted" style="margin-top:0;">Selecciona el técnico y el rango de fechas. El reporte calculará los tiempos exactamente en <strong>minutos</strong>.</p>
+        <label>
+          <span>Técnico a exportar:</span>
+          <select id="exportUsuario">
+            <option value="__all__">Equipo completo (Todos los técnicos)</option>
+          </select>
+        </label>
+        <label>
+          <span>Fecha de inicio (Desde):</span>
+          <input type="date" id="exportFechaInicio" />
+        </label>
+        <label>
+          <span>Fecha de fin (Hasta):</span>
+          <input type="date" id="exportFechaFin" />
+        </label>
+      </div>
+      <div class="modal-footer">
+        <button type="button" id="btnCancelExport" class="btn btn-secondary">Cancelar</button>
+        <button type="button" id="btnDownloadExport" class="btn btn-excel">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="7 10 12 15 17 10"></polyline>
+            <line x1="12" y1="15" x2="12" y2="3"></line>
+          </svg>
+          Descargar .xlsx
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <footer class="footer">
+    <span><strong>Registro de Tiempos</strong> · Base de datos SQLite local</span>
+    <span class="muted">Roles: Administrador · Ingeniero · Técnico</span>
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js"></script>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Base de datos SQLite local (se genera automáticamente con database.py)
+*.db
+*.sqlite3
+
+# Archivos de prueba temporales
+test_*.py
+
+# Archivos del sistema y SO
+.DS_Store
+Thumbs.db
+desktop.ini
+*.tmp

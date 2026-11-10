@@ -1,0 +1,1667 @@
+<script>
+(() => {
+  const cfg = window.JB_TIME_CONFIG || { useDemoData: true };
+  const META_BY_DOW = { 1: 510, 2: 510, 3: 510, 4: 510, 5: 450, 6: 0, 7: 0 };
+  const CUSTOM_TYPES_KEY = "jb_time_custom_types";
+  const DEMO_PINS = {};
+
+  const DEFAULT_TIPOS = [
+    { nombre: "Ticket", clase: "Gestion", requiereNumero: true, requiereAsunto: true, sistema: true, activo: true },
+    { nombre: "Pausa", clase: "Pausa", requiereNumero: false, requiereAsunto: true, sistema: true, activo: true },
+    { nombre: "Reunión", clase: "Gestion", requiereNumero: false, requiereAsunto: true, sistema: true, activo: true },
+  ];
+
+  let state = {
+    usuarios: [],
+    tickets: [],
+    actividades: [],
+    tipos: [],
+    config: { metaSemanal: 2490, almuerzo: 60 },
+  };
+
+  let chartWeek;
+  let chartCasos;
+
+  const $ = (id) => document.getElementById(id);
+
+  function nowInBogota() {
+    return new Date(
+      new Date().toLocaleString("en-US", { timeZone: cfg.timezone || "America/Bogota" })
+    );
+  }
+
+  function isoDate(d) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+
+  function isoTime(d) {
+    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  }
+
+  function weekday2(d) {
+    const js = d.getDay();
+    return js === 0 ? 7 : js;
+  }
+
+  function startOfWeek(d) {
+    const copy = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    copy.setDate(copy.getDate() - (weekday2(copy) - 1));
+    return copy;
+  }
+
+  function parseDate(value) {
+    if (!value) return null;
+    if (value instanceof Date) return value;
+    const s = String(value).slice(0, 10);
+    const [y, m, d] = s.split("-").map(Number);
+    if (!y || !m || !d) return null;
+    return new Date(y, m - 1, d);
+  }
+
+  function setStatus(kind, text, syncText) {
+    const dot = $("statusDot");
+    dot.className = "status-dot" + (kind === "ok" ? " ok" : kind === "err" ? " err" : "");
+    $("statusText").textContent = text;
+    $("lastSync").textContent = syncText || "";
+  }
+
+  function loadCustomTypes() {
+    try {
+      const raw = localStorage.getItem(CUSTOM_TYPES_KEY);
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function saveCustomTypes(list) {
+    localStorage.setItem(CUSTOM_TYPES_KEY, JSON.stringify(list));
+  }
+
+  function mergeTipos(fromPayload) {
+    const base = (fromPayload && fromPayload.length ? fromPayload : DEFAULT_TIPOS).filter((t) => t.activo !== false);
+    const extra = loadCustomTypes();
+    const names = new Set(base.map((t) => t.nombre.toLowerCase()));
+    extra.forEach((t) => {
+      if (!names.has(t.nombre.toLowerCase())) base.push(t);
+    });
+    return base;
+  }
+
+  function findTipo(nombre) {
+    return state.tipos.find((t) => t.nombre === nombre) || DEFAULT_TIPOS[0];
+  }
+
+  function demoPayload() {
+    const today = nowInBogota();
+    const yday = new Date(today);
+    yday.setDate(today.getDate() - 1);
+    const t = isoDate(today);
+    const y = isoDate(yday);
+
+    return {
+      generatedAt: new Date().toISOString(),
+      usuarios: [
+        { nombre: "Brayan", activo: true, admin: true },
+        { nombre: "Johan", activo: true, admin: false },
+      ],
+      tipos: DEFAULT_TIPOS,
+      config: {
+        metaSemanal: 2490,
+        almuerzo: 60,
+        jornada: META_BY_DOW,
+      },
+      tickets: [
+        { id: 1, fecha: y, usuario: "Brayan", numero: "1024", caso: "Soporte API", minutos: 30, hora: "09:15" },
+        { id: 2, fecha: y, usuario: "Johan", numero: "1025", caso: "Incidente VPN", minutos: 45, hora: "10:00" },
+        { id: 3, fecha: t, usuario: "Brayan", numero: "1026", caso: "Cambio Exchange", minutos: 60, hora: "08:30" },
+        { id: 4, fecha: t, usuario: "Johan", numero: "1027", caso: "Revisión backlog", minutos: 25, hora: "11:00" },
+        { id: 5, fecha: t, usuario: "Brayan", numero: "1028", caso: "Documentación runbook", minutos: 40, hora: "14:00" },
+      ],
+      actividades: [
+        { id: 1, fecha: y, usuario: "Brayan", tipo: "Pausa", asunto: "Almuerzo", minutos: 60, hora: "12:30" },
+        { id: 2, fecha: y, usuario: "Johan", tipo: "Pausa", asunto: "Baño", minutos: 10, hora: "15:00" },
+        { id: 3, fecha: t, usuario: "Brayan", tipo: "Pausa", asunto: "Charla", minutos: 15, hora: "10:45" },
+        { id: 4, fecha: t, usuario: "Johan", tipo: "Reunión", asunto: "Daily equipo", minutos: 25, hora: "09:00" },
+        { id: 5, fecha: t, usuario: "Johan", tipo: "Pausa", asunto: "Almuerzo", minutos: 60, hora: "12:40" },
+      ],
+    };
+  }
+
+  function dataMode() {
+    if (typeof google !== "undefined" && google.script && google.script.run) return "gas";
+    if (cfg.dataMode) return cfg.dataMode;
+    return cfg.useDemoData || !cfg.apiGetUrl ? "demo" : "api";
+  }
+
+  function writeMode() {
+    if (typeof google !== "undefined" && google.script && google.script.run) return "gas";
+    if (cfg.writeMode) return cfg.writeMode;
+    return cfg.useDemoData || !cfg.apiPostUrl ? "demo" : "api";
+  }
+
+  function userFromPin(pin) {
+    const p = String(pin || "").trim();
+    const fromState = (state.usuarios || []).find((u) => String(u.pin || "").trim() === p);
+    if (fromState) return fromState.nombre;
+    const inverted = Object.entries(DEMO_PINS).find(([, code]) => code === p);
+    return inverted ? inverted[0] : null;
+  }
+
+  function normalizePayload(payload) {
+    const actividades = payload.actividades || (payload.ocio || []).map((o) => ({
+      id: o.id,
+      fecha: o.fecha,
+      usuario: o.usuario,
+      tipo: "Pausa",
+      asunto: o.tipo || o.asunto || "",
+      minutos: o.minutos,
+      hora: o.hora,
+    }));
+    const tickets = (payload.tickets || []).map((t) => ({
+      ...t,
+      usuario: String(t.usuario || "").trim(),
+      numero: String(t.numero || "").replace(/^#/, "").trim(),
+      caso: String(t.caso || "").trim(),
+      estado: String(t.estado || "Abierto").toLowerCase() === "cerrado" ? "Cerrado" : "Abierto",
+      observaciones: String(t.observaciones || "").trim(),
+    }));
+    return { ...payload, actividades, tickets };
+  }
+
+  async function fetchData() {
+    const mode = dataMode();
+    if (mode === "demo") return demoPayload();
+
+    if (mode === "gas") {
+      return new Promise((resolve, reject) => {
+        google.script.run
+          .withSuccessHandler(resolve)
+          .withFailureHandler(reject)
+          .getDashboardData();
+      });
+    }
+
+    if (mode === "json") {
+      const url = cfg.dataJsonUrl || "data.json";
+      const res = await fetch(url + (url.includes("?") ? "&" : "?") + "_=" + Date.now(), {
+        method: "GET",
+        cache: "no-store",
+      });
+      if (!res.ok) throw new Error(`No se pudo leer ${url} (${res.status})`);
+      return res.json();
+    }
+
+    if (!cfg.apiGetUrl) throw new Error("apiGetUrl vacío (dataMode=api)");
+    const headers = { Accept: "application/json" };
+    if (cfg.apiKey) headers["X-Api-Key"] = cfg.apiKey;
+    const res = await fetch(cfg.apiGetUrl, { method: "GET", headers });
+    if (!res.ok) throw new Error(`GET ${res.status}`);
+    return res.json();
+  }
+
+  async function postRegistro(payload) {
+    const mode = writeMode();
+    if (mode === "gas") {
+      return new Promise((resolve, reject) => {
+        google.script.run
+          .withSuccessHandler(resolve)
+          .withFailureHandler(reject)
+          .registrar(payload);
+      });
+    }
+
+    if (mode === "forms") {
+      throw new Error("El registro nativo no usa Microsoft Forms.");
+    }
+
+    if (mode === "demo") {
+      const now = nowInBogota();
+      if (payload.tipoActividad === "Ticket") {
+        state.tickets.push({
+          id: state.tickets.length + 1,
+          fecha: isoDate(now),
+          usuario: payload.usuario,
+          numero: payload.numeroTicket,
+          caso: payload.nombreCaso,
+          minutos: payload.minutos,
+          hora: isoTime(now),
+          estado: payload.estado === "Cerrado" ? "Cerrado" : "Abierto",
+          observaciones: payload.observaciones || "",
+        });
+      } else {
+        state.actividades.push({
+          id: state.actividades.length + 1,
+          fecha: isoDate(now),
+          usuario: payload.usuario,
+          tipo: payload.tipoActividad,
+          asunto: payload.asunto || "",
+          minutos: payload.minutos,
+          hora: isoTime(now),
+        });
+      }
+      return { ok: true, mensaje: "Guardado en modo demo (no escribe Excel)." };
+    }
+
+    if (!cfg.apiPostUrl) throw new Error("apiPostUrl vacío (writeMode=api)");
+    const headers = {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    };
+    if (cfg.apiKey) headers["X-Api-Key"] = cfg.apiKey;
+    const res = await fetch(cfg.apiPostUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok === false) {
+      throw new Error(data.mensaje || data.error || `POST ${res.status}`);
+    }
+    return data;
+  }
+
+  function setupWriteUI() {
+    const form = $("formRegistro");
+    const formsPanel = $("formsPanel");
+    const hint = $("registroHint");
+    if (formsPanel) formsPanel.classList.add("is-hidden");
+    if (form) form.classList.remove("is-hidden");
+    const mode = writeMode();
+    hint.textContent =
+      mode === "gas"
+        ? "El PIN identifica tu usuario y guarda en Google Sheet al instante."
+        : "El PIN identifica tu usuario automáticamente.";
+  }
+
+  function applyPayload(payload) {
+    const p = normalizePayload(payload);
+    state.usuarios = (p.usuarios || []).filter((u) => u.activo !== false);
+    state.tickets = p.tickets || [];
+    state.actividades = p.actividades || [];
+    state.tipos = mergeTipos(p.tipos);
+    state.config = {
+      metaSemanal: p.config?.metaSemanal ?? 2490,
+      almuerzo: p.config?.almuerzo ?? 60,
+      jornada: p.config?.jornada || META_BY_DOW,
+    };
+    fillUserSelects();
+    fillTipoSelect();
+    renderListaTipos();
+  }
+
+  function fillUserSelects() {
+    const filter = $("filterUser");
+    const currentFilter = filter.value || "__all__";
+    filter.innerHTML = '<option value="__all__">Equipo completo</option>';
+    state.usuarios.forEach((u) => {
+      const name = u.nombre || u;
+      filter.insertAdjacentHTML("beforeend", `<option value="${escapeAttr(name)}">${escapeHtml(name)}</option>`);
+    });
+    if ([...filter.options].some((o) => o.value === currentFilter)) filter.value = currentFilter;
+  }
+
+  function fillTipoSelect() {
+    const sel = $("regTipo");
+    const prev = sel.value;
+    sel.innerHTML = state.tipos
+      .map((t) => `<option value="${escapeAttr(t.nombre)}">${escapeHtml(t.nombre)}</option>`)
+      .join("");
+    if ([...sel.options].some((o) => o.value === prev)) sel.value = prev;
+    toggleFormFields();
+  }
+
+  function renderListaTipos() {
+    const el = $("listaTipos");
+    if (!el) return;
+    el.innerHTML = state.tipos
+      .map(
+        (t) =>
+          `<li><span>${escapeHtml(t.nombre)}${t.sistema ? " · sistema" : ""}</span><strong>${escapeHtml(t.clase)}</strong></li>`
+      )
+      .join("");
+  }
+
+  function selectedUser() {
+    const v = $("filterUser").value;
+    return v === "__all__" ? null : v;
+  }
+
+  function filterByUser(rows) {
+    const u = selectedUser();
+    if (!u) return rows;
+    return rows.filter((r) => r.usuario === u);
+  }
+
+  function sumMin(rows, pred) {
+    return rows.reduce((acc, r) => (pred(r) ? acc + Number(r.minutos || 0) : acc), 0);
+  }
+
+  function claseDe(tipoNombre) {
+    return (findTipo(tipoNombre).clase || "Gestion").toLowerCase() === "pausa" ? "Pausa" : "Gestion";
+  }
+
+  function computeMetrics() {
+    const today = nowInBogota();
+    const todayIso = isoDate(today);
+    const dow = weekday2(today);
+    const metaHoyBase = state.config.jornada[dow] ?? META_BY_DOW[dow] ?? 0;
+    const nUsers = Math.max(1, state.usuarios.length);
+    const metaHoy = selectedUser() ? metaHoyBase : metaHoyBase * nUsers;
+
+    const tickets = filterByUser(state.tickets);
+    const acts = filterByUser(state.actividades);
+
+    const gestionHoy =
+      sumMin(tickets, (r) => r.fecha === todayIso) +
+      sumMin(acts, (r) => r.fecha === todayIso && claseDe(r.tipo) === "Gestion");
+    const pausaHoy = sumMin(acts, (r) => r.fecha === todayIso && claseDe(r.tipo) === "Pausa");
+    const netoHoy = gestionHoy + pausaHoy;
+
+    const weekStart = startOfWeek(today);
+    const inWeek = (fecha) => {
+      const d = parseDate(fecha);
+      if (!d) return false;
+      const t0 = d.getTime();
+      return t0 >= weekStart.getTime() && t0 <= new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
+    };
+
+    const gestionSem =
+      sumMin(tickets, (r) => inWeek(r.fecha)) +
+      sumMin(acts, (r) => inWeek(r.fecha) && claseDe(r.tipo) === "Gestion");
+    const pausaSem = sumMin(acts, (r) => inWeek(r.fecha) && claseDe(r.tipo) === "Pausa");
+    const netoSem = gestionSem + pausaSem;
+    const metaSemanaVista = selectedUser() ? state.config.metaSemanal : state.config.metaSemanal * nUsers;
+
+    const days = [];
+    for (let i = 0; i < 5; i++) {
+      const d = new Date(weekStart);
+      d.setDate(weekStart.getDate() + i);
+      const iso = isoDate(d);
+      const meta = state.config.jornada[i + 1] ?? META_BY_DOW[i + 1];
+      const metaVista = selectedUser() ? meta : meta * nUsers;
+      const gestion =
+        sumMin(tickets, (r) => r.fecha === iso) +
+        sumMin(acts, (r) => r.fecha === iso && claseDe(r.tipo) === "Gestion");
+      const pausa = sumMin(acts, (r) => r.fecha === iso && claseDe(r.tipo) === "Pausa");
+      days.push({
+        label: ["Lun", "Mar", "Mié", "Jue", "Vie"][i],
+        meta: metaVista,
+        neto: gestion + pausa,
+      });
+    }
+
+    const dayNames = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"];
+    const casosUltimos7 = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() - i);
+      const iso = isoDate(d);
+      const vistos = new Set();
+      tickets.forEach((t) => {
+        if (String(t.fecha || "").slice(0, 10) !== iso) return;
+        const n = normTicket(t.numero);
+        if (n) vistos.add(n);
+      });
+      casosUltimos7.push({
+        label: `${dayNames[weekday2(d) - 1]} ${d.getDate()}`,
+        casos: vistos.size,
+      });
+    }
+
+    return {
+      metaHoy,
+      brutaHoy: gestionHoy,
+      ocioHoy: pausaHoy,
+      netoHoy,
+      deficit: Math.max(0, metaHoy - netoHoy),
+      excedente: Math.max(0, netoHoy - metaHoy),
+      pct: metaHoy ? netoHoy / metaHoy : 0,
+      brutaSem: gestionSem,
+      ocioSem: pausaSem,
+      netoSem,
+      metaSemanaVista,
+      deficitSem: Math.max(0, metaSemanaVista - netoSem),
+      excedenteSem: Math.max(0, netoSem - metaSemanaVista),
+      days,
+      casosUltimos7,
+    };
+  }
+
+  function renderKpis(m) {
+    const items = [
+      { label: "Meta hoy", value: m.metaHoy, cls: "" },
+      { label: "Gestión (tickets + reuniones)", value: m.brutaHoy, cls: "" },
+      { label: "Pausa", value: m.ocioHoy, cls: "kpi--ocio" },
+      { label: "Neto real", value: m.netoHoy, cls: "kpi--neto" },
+      { label: "Déficit", value: m.deficit, cls: "kpi--deficit" },
+      { label: "Excedente", value: m.excedente, cls: "kpi--excedente" },
+    ];
+    $("kpiGrid").innerHTML = items
+      .map(
+        (k) => `
+      <article class="kpi ${k.cls}">
+        <span class="kpi-label">${k.label}</span>
+        <div class="kpi-value">${k.value}<small>min</small></div>
+      </article>`
+      )
+      .join("");
+  }
+
+  function renderWeekStats(m) {
+    $("weekStats").innerHTML = `
+      <li><span>Meta semana</span><strong>${m.metaSemanaVista} min</strong></li>
+      <li><span>Neto semana</span><strong>${m.netoSem} min</strong></li>
+      <li><span>Pausa semana</span><strong>${m.ocioSem} min</strong></li>
+      <li><span>Déficit</span><strong class="stat-deficit">${m.deficitSem}</strong></li>
+      <li><span>Excedente / banco</span><strong class="stat-excedente">${m.excedenteSem}</strong></li>
+      <li><span>Cumplimiento hoy</span><strong>${Math.round(m.pct * 100)}%</strong></li>
+    `;
+  }
+
+  function renderRecent() {
+    const tickets = filterByUser(state.tickets).map((t) => ({
+      tipo: "ticket",
+      usuario: t.usuario,
+      detalle: `#${t.numero} ${t.caso}${t.estado === "Cerrado" ? " · cerrado" : ""}`,
+      minutos: t.minutos,
+      fecha: t.fecha,
+      hora: t.hora,
+    }));
+    const acts = filterByUser(state.actividades).map((a) => ({
+      tipo: a.tipo.toLowerCase() === "pausa" ? "pausa" : "actividad",
+      usuario: a.usuario,
+      detalle: `${a.tipo}${a.asunto ? " · " + a.asunto : ""}`,
+      minutos: a.minutos,
+      fecha: a.fecha,
+      hora: a.hora,
+    }));
+    const rows = [...tickets, ...acts]
+      .sort((a, b) => `${b.fecha} ${b.hora}`.localeCompare(`${a.fecha} ${a.hora}`))
+      .slice(0, 12);
+
+    const tbody = $("recentTable").querySelector("tbody");
+    tbody.innerHTML = rows
+      .map(
+        (r) => `
+      <tr>
+        <td><span class="badge badge-${r.tipo === "ticket" ? "ticket" : "ocio"}">${escapeHtml(r.tipo)}</span></td>
+        <td>${escapeHtml(r.usuario)}</td>
+        <td>${escapeHtml(r.detalle)}</td>
+        <td>${r.minutos}</td>
+        <td>${r.fecha}</td>
+        <td>${r.hora || ""}</td>
+      </tr>`
+      )
+      .join("");
+  }
+
+  function renderCharts(m) {
+    if (typeof Chart === "undefined") {
+      console.warn("Chart.js no cargó; se ocultan gráficos.");
+      return;
+    }
+    const css = getComputedStyle(document.documentElement);
+    const read = (name, fallback) => (css.getPropertyValue(name) || fallback).trim();
+    const blue = read("--blue-bright", "#4d8cff");
+    const muted = read("--muted", "#8b9bb8");
+    const grid = read("--chart-grid", "rgba(255,255,255,0.06)");
+    const metaFill = document.documentElement.getAttribute("data-theme") === "light"
+      ? "rgba(92, 109, 134, 0.22)"
+      : "rgba(139, 155, 184, 0.25)";
+
+    if (chartWeek) chartWeek.destroy();
+    if (chartCasos) chartCasos.destroy();
+
+    chartWeek = new Chart($("chartWeek"), {
+      type: "bar",
+      data: {
+        labels: m.days.map((d) => d.label),
+        datasets: [
+          {
+            label: "Meta",
+            data: m.days.map((d) => d.meta),
+            backgroundColor: metaFill,
+            borderRadius: 8,
+          },
+          {
+            label: "Neto real",
+            data: m.days.map((d) => d.neto),
+            backgroundColor: blue,
+            borderRadius: 8,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { labels: { color: muted } } },
+        scales: {
+          x: { ticks: { color: muted }, grid: { color: grid } },
+          y: { ticks: { color: muted }, grid: { color: grid } },
+        },
+      },
+    });
+
+    const serie = m.casosUltimos7 || [];
+    const fill = document.documentElement.getAttribute("data-theme") === "light"
+      ? "rgba(47, 107, 255, 0.12)"
+      : "rgba(77, 140, 255, 0.18)";
+    chartCasos = new Chart($("chartCasos"), {
+      type: "line",
+      data: {
+        labels: serie.map((d) => d.label),
+        datasets: [
+          {
+            label: "Casos",
+            data: serie.map((d) => d.casos),
+            borderColor: blue,
+            backgroundColor: fill,
+            fill: true,
+            tension: 0.3,
+            pointRadius: 4,
+            pointBackgroundColor: blue,
+            borderWidth: 2,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label(item) {
+                const n = item.parsed.y || 0;
+                return n === 1 ? "1 caso" : `${n} casos`;
+              },
+            },
+          },
+        },
+        scales: {
+          x: { ticks: { color: muted }, grid: { color: grid } },
+          y: {
+            beginAtZero: true,
+            ticks: { color: muted, stepSize: 1, precision: 0 },
+            grid: { color: grid },
+          },
+        },
+      },
+    });
+  }
+
+  function renderAll() {
+    const m = computeMetrics();
+    try { renderKpis(m); } catch (e) { console.error(e); }
+    try { renderWeekStats(m); } catch (e) { console.error(e); }
+    try { renderRecent(); } catch (e) { console.error(e); }
+    try { renderCharts(m); } catch (e) { console.error(e); }
+  }
+
+  async function refresh() {
+    const btn = $("btnRefresh");
+    btn.classList.add("is-loading");
+    try {
+      const payload = await fetchData();
+      applyPayload(payload);
+      renderAll();
+      if ($("casoQuery") && $("casoQuery").value.trim()) renderConsulta();
+      const mode = dataMode();
+      const label = mode === "demo" ? "modo demo" : mode === "json" ? "data.json" : mode === "gas" ? "Google Sheet" : "API";
+      setStatus("ok", `Datos listos (${label})`, `Sync ${isoTime(nowInBogota())}`);
+    } catch (err) {
+      console.error(err);
+      setStatus("err", `Error al cargar: ${err.message}`, "");
+      try { renderAll(); } catch (e2) { console.error(e2); }
+    } finally {
+      btn.classList.remove("is-loading");
+    }
+  }
+
+  const CRONO_KEY = "jb_time_cronometro";
+  const WAKE_KEY = "jb_time_stay_awake";
+  const CRONO_TICKS = 60;
+  let cronoTimer = null;
+  let wakeLockSentinel = null;
+  let stayAwakeOn = false;
+
+  function cronoState() {
+    try {
+      return JSON.parse(sessionStorage.getItem(CRONO_KEY) || "null") || {
+        running: false,
+        startedAt: 0,
+        accumulatedMs: 0,
+      };
+    } catch {
+      return { running: false, startedAt: 0, accumulatedMs: 0 };
+    }
+  }
+
+  function saveCrono(s) {
+    sessionStorage.setItem(CRONO_KEY, JSON.stringify(s));
+  }
+
+  function cronoElapsedMs() {
+    const s = cronoState();
+    return s.accumulatedMs + (s.running && s.startedAt ? Date.now() - s.startedAt : 0);
+  }
+
+  function ensureCronoTicks() {
+    const g = $("cronoTicks");
+    if (!g) return;
+    if (g.getAttribute("data-ready") === "1") return;
+    g.innerHTML = "";
+    for (let i = 0; i < CRONO_TICKS; i++) {
+      const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      rect.setAttribute("class", "crono-tick");
+      rect.setAttribute("x", "48.85");
+      rect.setAttribute("y", "3.8");
+      rect.setAttribute("width", "2.3");
+      rect.setAttribute("height", "10.5");
+      rect.setAttribute("rx", "1.15");
+      rect.setAttribute("transform", `rotate(${i * 6} 50 50)`);
+      g.appendChild(rect);
+    }
+    g.setAttribute("data-ready", "1");
+  }
+
+  function renderCrono() {
+    const el = $("cronoDisplay");
+    const box = $("cronometroBox");
+    if (!el) return;
+    ensureCronoTicks();
+    const ms = cronoElapsedMs();
+    el.textContent = String(Math.floor(ms / 60000));
+    const sec = Math.floor((ms % 60000) / 1000);
+    const ticks = document.querySelectorAll("#cronoTicks .crono-tick");
+    ticks.forEach((tick, i) => {
+      tick.classList.toggle("is-on", ms > 0 && i <= sec);
+    });
+    if (box) box.classList.toggle("is-running", !!cronoState().running);
+  }
+
+  function startCronoTick() {
+    if (cronoTimer) return;
+    cronoTimer = setInterval(renderCrono, 200);
+  }
+
+  function stopCronoTick() {
+    if (cronoTimer) {
+      clearInterval(cronoTimer);
+      cronoTimer = null;
+    }
+  }
+
+  function cronoStart() {
+    const s = cronoState();
+    if (s.running) return;
+    s.running = true;
+    s.startedAt = Date.now();
+    saveCrono(s);
+    startCronoTick();
+    renderCrono();
+  }
+
+  function cronoStop() {
+    const s = cronoState();
+    if (s.running) {
+      s.accumulatedMs += Date.now() - s.startedAt;
+      s.running = false;
+      s.startedAt = 0;
+      saveCrono(s);
+    }
+    stopCronoTick();
+    renderCrono();
+  }
+
+  function cronoReset() {
+    saveCrono({ running: false, startedAt: 0, accumulatedMs: 0 });
+    stopCronoTick();
+    renderCrono();
+  }
+
+  function setStayAwakeUi(on) {
+    const btn = $("btnStayAwake");
+    if (!btn) return;
+    btn.classList.toggle("is-on", !!on);
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+
+  async function requestWakeLock() {
+    if (!stayAwakeOn) return;
+    if (!navigator.wakeLock || !navigator.wakeLock.request) return;
+    try {
+      if (wakeLockSentinel) return;
+      wakeLockSentinel = await navigator.wakeLock.request("screen");
+      wakeLockSentinel.addEventListener("release", () => {
+        wakeLockSentinel = null;
+        if (stayAwakeOn && document.visibilityState === "visible") {
+          requestWakeLock();
+        }
+      });
+    } catch (err) {
+      /* El navegador exige gesto o bloquea Wake Lock. */
+    }
+  }
+
+  async function releaseWakeLock() {
+    try {
+      if (wakeLockSentinel) await wakeLockSentinel.release();
+    } catch (err) {
+      /* ignore */
+    }
+    wakeLockSentinel = null;
+  }
+
+  async function toggleStayAwake(ev) {
+    if (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+    }
+    stayAwakeOn = !stayAwakeOn;
+    sessionStorage.setItem(WAKE_KEY, stayAwakeOn ? "1" : "0");
+    setStayAwakeUi(stayAwakeOn);
+    if (stayAwakeOn) await requestWakeLock();
+    else await releaseWakeLock();
+  }
+
+  function setupStayAwake() {
+    stayAwakeOn = sessionStorage.getItem(WAKE_KEY) === "1";
+    setStayAwakeUi(stayAwakeOn);
+    const btn = $("btnStayAwake");
+    if (btn) btn.addEventListener("click", toggleStayAwake);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible" && stayAwakeOn) requestWakeLock();
+    });
+    if (stayAwakeOn) requestWakeLock();
+  }
+
+  function toggleFormFields() {
+    const t = findTipo($("regTipo").value);
+    $("fieldsTicket").classList.toggle("is-hidden", !t.requiereNumero);
+    const obs = $("fieldsTicketObs");
+    if (obs) obs.classList.toggle("is-hidden", !t.requiereNumero);
+    const crono = $("cronometroBox");
+    if (crono) crono.classList.toggle("is-hidden", !t.requiereNumero);
+    const hint = $("ticketHint");
+    if (hint) hint.classList.toggle("is-hidden", !t.requiereNumero);
+    $("fieldsAsunto").classList.toggle("is-hidden", !t.requiereAsunto || !!t.requiereNumero);
+    $("regNumero").required = !!t.requiereNumero;
+    $("regCaso").required = !!t.requiereNumero;
+    $("regAsunto").required = !!t.requiereAsunto && !t.requiereNumero;
+  }
+
+  function normTicket(n) {
+    const s = String(n || "").replace(/^#/, "").replace(/\s+/g, "").trim().toLowerCase();
+    const digits = s.replace(/\D/g, "");
+    if (digits.length >= 3 && digits.length >= s.replace(/[.,]/g, "").length) return digits;
+    return s;
+  }
+
+  function sesionesCaso(numero) {
+    const n = normTicket(numero);
+    return state.tickets.filter((t) => normTicket(t.numero) === n);
+  }
+
+  function estadoCaso(rows) {
+    if (!rows.length) return "Abierto";
+    const sorted = [...rows].sort((a, b) => `${a.fecha} ${a.hora || ""}`.localeCompare(`${b.fecha} ${b.hora || ""}`));
+    return sorted[sorted.length - 1].estado === "Cerrado" ? "Cerrado" : "Abierto";
+  }
+
+  function completarNombreCaso() {
+    const numero = $("regNumero").value.trim();
+    const campo = $("regCaso");
+    if (!numero || (campo.value && campo.value.trim())) return;
+    const rows = sesionesCaso(numero);
+    if (!rows.length) return;
+    const last = [...rows].reverse().find((r) => r.caso);
+    if (last) campo.value = last.caso;
+  }
+
+  function agruparCasos() {
+    const map = new Map();
+    state.tickets.forEach((t) => {
+      const key = normTicket(t.numero);
+      if (!key) return;
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(t);
+    });
+    return [...map.entries()].map(([, rows]) => {
+      const sorted = [...rows].sort((a, b) => `${a.fecha} ${a.hora || ""}`.localeCompare(`${b.fecha} ${b.hora || ""}`));
+      const last = sorted[sorted.length - 1];
+      const porUsuario = {};
+      sorted.forEach((r) => {
+        const u = String(r.usuario || "").trim() || "—";
+        porUsuario[u] = (porUsuario[u] || 0) + Number(r.minutos || 0);
+      });
+      return {
+        numero: last.numero,
+        caso: [...sorted].reverse().find((r) => r.caso)?.caso || "",
+        estado: estadoCaso(sorted),
+        total: sorted.reduce((a, r) => a + Number(r.minutos || 0), 0),
+        porUsuario,
+        sesiones: sorted,
+      };
+    });
+  }
+
+  function buscarCasos(query) {
+    const qNorm = normTicket(query);
+    const qText = String(query || "").trim().toLowerCase().replace(/^#/, "");
+    if (!qNorm && !qText) return [];
+    return agruparCasos().filter((c) => {
+      const n = normTicket(c.numero);
+      const nombre = String(c.caso || "").toLowerCase();
+      const obs = (c.sesiones || []).some((s) => String(s.observaciones || "").toLowerCase().includes(qText));
+      return (qNorm && (n === qNorm || n.includes(qNorm))) || nombre.includes(qText) || obs;
+    });
+  }
+
+  function renderConsulta(e) {
+    if (e) e.preventDefault();
+    const msg = $("casoMsg");
+    const box = $("casoResultado");
+    if (!msg || !box) return;
+    msg.textContent = "";
+    msg.className = "form-msg";
+    const q = $("casoQuery").value;
+    const casos = buscarCasos(q);
+    if (!casos.length) {
+      box.innerHTML = "";
+      msg.textContent = "No hay casos con ese número o nombre.";
+      msg.classList.add("err");
+      return;
+    }
+    box.innerHTML = casos
+      .map((c) => {
+        const users = Object.entries(c.porUsuario)
+          .map(([u, m]) => `${escapeHtml(u)}: ${m} min`)
+          .join(" · ");
+        const rows = c.sesiones
+          .map(
+            (s) => `<tr>
+              <td>${escapeHtml(s.fecha)}</td>
+              <td>${escapeHtml(s.hora || "")}</td>
+              <td>${escapeHtml(String(s.usuario || "").trim())}</td>
+              <td>${s.minutos}</td>
+              <td><span class="badge ${s.estado === "Cerrado" ? "badge-cerrado" : "badge-abierto"}">${escapeHtml(s.estado)}</span></td>
+              <td>${escapeHtml(s.observaciones || "—")}</td>
+            </tr>`
+          )
+          .join("");
+        return `<article class="caso-card">
+          <header class="caso-head">
+            <h3>#${escapeHtml(c.numero)} · ${escapeHtml(c.caso)}</h3>
+            <span class="badge ${c.estado === "Cerrado" ? "badge-cerrado" : "badge-abierto"}">${escapeHtml(c.estado)}</span>
+          </header>
+          <p class="muted">Total gestión: <strong>${c.total} min</strong>${users ? " · " + users : ""}</p>
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead><tr><th>Fecha</th><th>Hora</th><th>Usuario</th><th>Min</th><th>Estado</th><th>Observaciones</th></tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+        </article>`;
+      })
+      .join("");
+  }
+
+  function pinOk(usuario, pin) {
+    if (writeMode() !== "demo") return true;
+    return DEMO_PINS[usuario] === pin;
+  }
+
+  function isAdminUser(nombre) {
+    const u = state.usuarios.find((x) => x.nombre === nombre);
+    return !!(u && u.admin);
+  }
+
+  const ADMIN_PIN_KEY = "jb_time_admin_pin";
+  const admin = { pin: "", tab: "usuarios", data: null, editKey: null, filter: "" };
+
+  function setAdminMsg(text, kind) {
+    const msg = $("adminMsg");
+    if (!msg) return;
+    msg.textContent = text || "";
+    msg.className = "form-msg" + (kind ? " " + kind : "");
+  }
+
+  function adminUnlocked() {
+    return !!(admin.pin && admin.data);
+  }
+
+  function optionList(values, selected) {
+    return values
+      .map((v) => `<option value="${escapeAttr(v)}"${String(v) === String(selected) ? " selected" : ""}>${escapeHtml(v)}</option>`)
+      .join("");
+  }
+
+  function demoAdminSnapshot() {
+    const jornadaMap = state.config.jornada || META_BY_DOW;
+    const dias = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"];
+    return {
+      ok: true,
+      usuarios: (state.usuarios.length ? state.usuarios : demoPayload().usuarios).map((u) => ({
+        nombre: u.nombre,
+        pin: u.pin || DEMO_PINS[u.nombre] || "",
+        activo: u.activo !== false,
+        admin: !!u.admin,
+        notas: u.notas || "",
+      })),
+      tipos: (state.tipos.length ? state.tipos : DEFAULT_TIPOS).map((t) => ({ ...t })),
+      tickets: state.tickets.map((t) => ({ ...t })),
+      actividades: state.actividades.map((a) => ({ ...a })),
+      jornada: [1, 2, 3, 4, 5, 6, 7].map((codigo) => ({
+        dia: dias[codigo - 1],
+        codigo,
+        minutos: jornadaMap[codigo] ?? 0,
+        horas: Math.round(((jornadaMap[codigo] ?? 0) / 60) * 100) / 100,
+        activo: (jornadaMap[codigo] ?? 0) > 0,
+      })),
+      config: [
+        { parametro: "Almuerzo_Estandar_Min", valor: String(state.config.almuerzo ?? 60), unidad: "minutos", descripcion: "Almuerzo descontado por defecto" },
+        { parametro: "Meta_Semanal_Min", valor: String(state.config.metaSemanal ?? 2490), unidad: "minutos", descripcion: "Suma de jornada activa" },
+        { parametro: "Zona_Horaria", valor: "America/Bogota", unidad: "IANA", descripcion: "UTC-5 Colombia" },
+      ],
+    };
+  }
+
+  function demoAdminOperar(payload) {
+    if (!admin.data) admin.data = demoAdminSnapshot();
+    const accion = payload.accion || "listar";
+    const tabla = payload.tabla;
+    const d = payload.datos || {};
+    if (accion === "listar") return { ...admin.data, ok: true };
+    const data = admin.data;
+    const msg = (text) => {
+      data.ok = true;
+      data.mensaje = text;
+      return data;
+    };
+    const fail = (text) => ({ ok: false, mensaje: text });
+
+    if (tabla === "usuarios") {
+      if (accion === "borrar") {
+        const i = data.usuarios.findIndex((u) => u.nombre === d.clave);
+        if (i < 0) return fail("Usuario no encontrado.");
+        const admins = data.usuarios.filter((u, idx) => idx !== i && u.admin && u.activo !== false).length;
+        if (data.usuarios[i].admin && admins < 1) return fail("No puedes borrar al último admin.");
+        data.usuarios.splice(i, 1);
+        return msg("Usuario eliminado.");
+      }
+      const clave = d.clave || "";
+      if (data.usuarios.some((u) => u.nombre.toLowerCase() === String(d.nombre).toLowerCase() && u.nombre !== clave)) {
+        return fail("Ese usuario ya existe.");
+      }
+      if (data.usuarios.some((u) => u.pin === String(d.pin) && u.nombre !== clave)) return fail("Ese PIN ya está asignado.");
+      const row = { nombre: d.nombre, pin: String(d.pin), activo: !!d.activo, admin: !!d.admin, notas: d.notas || "" };
+      const idx = data.usuarios.findIndex((u) => u.nombre === clave);
+      if (idx >= 0) data.usuarios[idx] = row;
+      else data.usuarios.push(row);
+      return msg("Usuario guardado.");
+    }
+    if (tabla === "tipos") {
+      if (accion === "borrar") {
+        const i = data.tipos.findIndex((t) => t.nombre === d.clave);
+        if (i < 0) return fail("Tipo no encontrado.");
+        if (data.tipos[i].sistema) return fail("Los tipos de sistema no se borran. Puedes desactivarlos.");
+        data.tipos.splice(i, 1);
+        return msg("Tipo eliminado.");
+      }
+      const clave = d.clave || "";
+      const row = {
+        nombre: d.nombre,
+        clase: d.clase === "Pausa" ? "Pausa" : "Gestion",
+        requiereNumero: !!d.requiereNumero,
+        requiereAsunto: d.requiereAsunto !== false,
+        sistema: false,
+        activo: d.activo !== false,
+      };
+      const idx = data.tipos.findIndex((t) => t.nombre === clave);
+      if (idx >= 0) data.tipos[idx] = { ...data.tipos[idx], ...row, sistema: data.tipos[idx].sistema };
+      else data.tipos.push(row);
+      return msg("Tipo guardado.");
+    }
+    if (tabla === "tickets") {
+      if (accion === "borrar") {
+        data.tickets = data.tickets.filter((t) => String(t.id) !== String(d.id));
+        return msg("Registro de ticket eliminado.");
+      }
+      const row = {
+        id: d.id || Date.now(),
+        fecha: d.fecha,
+        usuario: d.usuario,
+        numero: String(d.numero || "").replace(/^#/, ""),
+        caso: d.caso || "",
+        minutos: Number(d.minutos),
+        hora: d.hora || "",
+        estado: d.estado === "Cerrado" ? "Cerrado" : "Abierto",
+        observaciones: d.observaciones || "",
+      };
+      const idx = data.tickets.findIndex((t) => String(t.id) === String(row.id));
+      if (idx >= 0) data.tickets[idx] = row;
+      else data.tickets.push(row);
+      return msg("Ticket guardado.");
+    }
+    if (tabla === "actividades") {
+      if (accion === "borrar") {
+        data.actividades = data.actividades.filter((t) => String(t.id) !== String(d.id));
+        return msg("Actividad eliminada.");
+      }
+      const row = {
+        id: d.id || Date.now(),
+        fecha: d.fecha,
+        usuario: d.usuario,
+        tipo: d.tipo || "Pausa",
+        asunto: d.asunto || "",
+        minutos: Number(d.minutos),
+        hora: d.hora || "",
+      };
+      const idx = data.actividades.findIndex((t) => String(t.id) === String(row.id));
+      if (idx >= 0) data.actividades[idx] = row;
+      else data.actividades.push(row);
+      return msg("Actividad guardada.");
+    }
+    if (tabla === "jornada") {
+      const j = data.jornada.find((x) => Number(x.codigo) === Number(d.codigo));
+      if (!j) return fail("Día no encontrado.");
+      j.minutos = Number(d.minutos) || 0;
+      j.horas = Math.round((j.minutos / 60) * 100) / 100;
+      j.activo = !!d.activo;
+      const meta = data.jornada.reduce((acc, x) => acc + (x.activo ? Number(x.minutos) || 0 : 0), 0);
+      const cfg = data.config.find((c) => c.parametro === "Meta_Semanal_Min");
+      if (cfg) cfg.valor = String(meta);
+      return msg("Jornada actualizada. Meta semanal = " + meta + " min.");
+    }
+    if (tabla === "config") {
+      if (accion === "borrar") {
+        if (d.clave === "Zona_Horaria" || d.clave === "Meta_Semanal_Min") {
+          return fail("Ese parámetro no se borra. Puedes editar su valor.");
+        }
+        data.config = data.config.filter((c) => c.parametro !== d.clave);
+        return msg("Parámetro eliminado.");
+      }
+      const row = { parametro: d.parametro, valor: String(d.valor ?? ""), unidad: d.unidad || "", descripcion: d.descripcion || "" };
+      const idx = data.config.findIndex((c) => c.parametro === (d.clave || d.parametro));
+      if (idx >= 0) data.config[idx] = row;
+      else data.config.push(row);
+      return msg("Configuración guardada.");
+    }
+    return fail("Tabla no reconocida.");
+  }
+
+  function adminCall(payload) {
+    const body = { ...payload, pin: admin.pin };
+    if (writeMode() === "gas") {
+      return new Promise((resolve, reject) => {
+        google.script.run
+          .withSuccessHandler(resolve)
+          .withFailureHandler(reject)
+          .adminOperar(body);
+      });
+    }
+    return Promise.resolve(demoAdminOperar(body));
+  }
+
+  function applyAdminResult(result, silent) {
+    if (!result || !result.ok) {
+      setAdminMsg((result && result.mensaje) || "No se pudo guardar.", "err");
+      return false;
+    }
+    admin.data = result;
+    if (!silent) setAdminMsg(result.mensaje || "Listo.", "ok");
+    admin.editKey = null;
+    renderAdmin();
+    if (writeMode() === "gas") {
+      refresh();
+    } else {
+      state.usuarios = result.usuarios || state.usuarios;
+      state.tickets = result.tickets || state.tickets;
+      state.actividades = result.actividades || state.actividades;
+      state.tipos = (result.tipos || state.tipos).filter((t) => t.activo !== false);
+      const jornada = { ...META_BY_DOW };
+      (result.jornada || []).forEach((j) => { jornada[j.codigo] = j.minutos; });
+      const almuerzo = (result.config || []).find((c) => c.parametro === "Almuerzo_Estandar_Min");
+      const meta = (result.config || []).find((c) => c.parametro === "Meta_Semanal_Min");
+      state.config = {
+        ...state.config,
+        jornada,
+        almuerzo: almuerzo ? Number(almuerzo.valor) : state.config.almuerzo,
+        metaSemanal: meta ? Number(meta.valor) : state.config.metaSemanal,
+      };
+      fillUserSelects();
+      fillTipoSelect();
+      renderAll();
+    }
+    return true;
+  }
+
+  function adminUserNames() {
+    return ((admin.data && admin.data.usuarios) || state.usuarios).map((u) => u.nombre);
+  }
+
+  function adminTipoNames() {
+    return ((admin.data && admin.data.tipos) || state.tipos).map((t) => t.nombre);
+  }
+
+  function renderAdminEditor() {
+    const form = $("formAdminEdit");
+    if (!form || !admin.data) return;
+    const tab = admin.tab;
+    const key = admin.editKey;
+    const actions = `<div class="form-actions">
+      <button type="submit" class="btn btn-primary" id="btnAdminSave">${key ? "Guardar cambios" : "Agregar"}</button>
+      ${key ? `<button type="button" class="btn btn-secondary" id="btnAdminCancel">Cancelar</button>` : ""}
+    </div>`;
+
+    if (tab === "usuarios") {
+      const u = (admin.data.usuarios || []).find((x) => x.nombre === key) || { nombre: "", pin: "", activo: true, admin: false, notas: "" };
+      form.innerHTML = `
+        <input type="hidden" id="admClave" value="${escapeAttr(key || "")}" />
+        <div class="form-row">
+          <label>Usuario<input id="admNombre" value="${escapeAttr(u.nombre)}" required /></label>
+          <label>PIN<input id="admPinUser" value="${escapeAttr(u.pin)}" maxlength="8" required /></label>
+          <label>Notas<input id="admNotas" value="${escapeAttr(u.notas || "")}" /></label>
+        </div>
+        <div class="form-row">
+          <label class="check"><input type="checkbox" id="admActivo" ${u.activo !== false ? "checked" : ""} /> Activo</label>
+          <label class="check"><input type="checkbox" id="admEsAdmin" ${u.admin ? "checked" : ""} /> Admin</label>
+        </div>${actions}`;
+      return;
+    }
+    if (tab === "tipos") {
+      const t = (admin.data.tipos || []).find((x) => x.nombre === key) || {
+        nombre: "", clase: "Gestion", requiereNumero: false, requiereAsunto: true, activo: true, sistema: false,
+      };
+      form.innerHTML = `
+        <input type="hidden" id="admClave" value="${escapeAttr(key || "")}" />
+        <div class="form-row">
+          <label>Nombre<input id="admNombre" value="${escapeAttr(t.nombre)}" required ${t.sistema ? "readonly" : ""} /></label>
+          <label>Clase<select id="admClase">${optionList(["Gestion", "Pausa"], t.clase)}</select></label>
+        </div>
+        <div class="form-row">
+          <label class="check"><input type="checkbox" id="admReqNum" ${t.requiereNumero ? "checked" : ""} /> Requiere Nº ticket</label>
+          <label class="check"><input type="checkbox" id="admReqAsunto" ${t.requiereAsunto !== false ? "checked" : ""} /> Requiere asunto</label>
+          <label class="check"><input type="checkbox" id="admActivo" ${t.activo !== false ? "checked" : ""} /> Activo</label>
+        </div>${actions}`;
+      return;
+    }
+    if (tab === "tickets") {
+      const t = (admin.data.tickets || []).find((x) => String(x.id) === String(key)) || {
+        id: "", fecha: isoDate(nowInBogota()), usuario: adminUserNames()[0] || "", numero: "", caso: "", minutos: "", hora: isoTime(nowInBogota()), estado: "Abierto", observaciones: "",
+      };
+      form.innerHTML = `
+        <input type="hidden" id="admId" value="${escapeAttr(t.id || "")}" />
+        <div class="form-row">
+          <label>Fecha<input type="date" id="admFecha" value="${escapeAttr(t.fecha || "")}" required /></label>
+          <label>Usuario<select id="admUsuario">${optionList(adminUserNames(), t.usuario)}</select></label>
+          <label>Nº Ticket<input id="admNumero" value="${escapeAttr(t.numero || "")}" /></label>
+          <label>Minutos<input type="number" id="admMinutos" min="1" value="${escapeAttr(t.minutos || "")}" required /></label>
+        </div>
+        <div class="form-row">
+          <label class="grow">Nombre del caso<input id="admCaso" value="${escapeAttr(t.caso || "")}" /></label>
+          <label>Hora<input id="admHora" value="${escapeAttr(t.hora || "")}" placeholder="HH:mm" /></label>
+          <label>Estado<select id="admEstado">${optionList(["Abierto", "Cerrado"], t.estado)}</select></label>
+        </div>
+        <label class="grow">Observaciones<textarea id="admObs" rows="2">${escapeHtml(t.observaciones || "")}</textarea></label>
+        ${actions}`;
+      return;
+    }
+    if (tab === "actividades") {
+      const t = (admin.data.actividades || []).find((x) => String(x.id) === String(key)) || {
+        id: "", fecha: isoDate(nowInBogota()), usuario: adminUserNames()[0] || "", tipo: "Pausa", asunto: "", minutos: "", hora: isoTime(nowInBogota()),
+      };
+      form.innerHTML = `
+        <input type="hidden" id="admId" value="${escapeAttr(t.id || "")}" />
+        <div class="form-row">
+          <label>Fecha<input type="date" id="admFecha" value="${escapeAttr(t.fecha || "")}" required /></label>
+          <label>Usuario<select id="admUsuario">${optionList(adminUserNames(), t.usuario)}</select></label>
+          <label>Tipo<select id="admTipoAct">${optionList(adminTipoNames(), t.tipo)}</select></label>
+          <label>Minutos<input type="number" id="admMinutos" min="1" value="${escapeAttr(t.minutos || "")}" required /></label>
+        </div>
+        <div class="form-row">
+          <label class="grow">Asunto<input id="admAsunto" value="${escapeAttr(t.asunto || "")}" /></label>
+          <label>Hora<input id="admHora" value="${escapeAttr(t.hora || "")}" placeholder="HH:mm" /></label>
+        </div>${actions}`;
+      return;
+    }
+    if (tab === "jornada") {
+      const j = (admin.data.jornada || []).find((x) => String(x.codigo) === String(key));
+      if (!j) {
+        form.innerHTML = `<p class="muted">Elige un día en la tabla para editar minutos y si cuenta en la meta.</p>`;
+        return;
+      }
+      form.innerHTML = `
+        <input type="hidden" id="admCodigo" value="${escapeAttr(j.codigo)}" />
+        <div class="form-row">
+          <label>Día<input id="admDia" value="${escapeAttr(j.dia)}" readonly /></label>
+          <label>Minutos laborales<input type="number" id="admMinutos" min="0" value="${escapeAttr(j.minutos)}" required /></label>
+          <label class="check"><input type="checkbox" id="admActivo" ${j.activo !== false ? "checked" : ""} /> Activo (suma a la meta)</label>
+        </div>${actions}`;
+      return;
+    }
+    if (tab === "config") {
+      const c = (admin.data.config || []).find((x) => x.parametro === key) || { parametro: "", valor: "", unidad: "", descripcion: "" };
+      form.innerHTML = `
+        <input type="hidden" id="admClave" value="${escapeAttr(key || "")}" />
+        <div class="form-row">
+          <label>Parámetro<input id="admParam" value="${escapeAttr(c.parametro)}" required /></label>
+          <label>Valor<input id="admValor" value="${escapeAttr(c.valor)}" required /></label>
+          <label>Unidad<input id="admUnidad" value="${escapeAttr(c.unidad || "")}" /></label>
+        </div>
+        <label class="grow">Descripción<input id="admDesc" value="${escapeAttr(c.descripcion || "")}" /></label>
+        ${actions}`;
+    }
+  }
+
+  function btnsRow(editKey, canDelete) {
+    return `<td>
+      <button type="button" class="btn btn-secondary btn-tiny" data-admin-edit="${escapeAttr(String(editKey))}">Editar</button>
+      ${canDelete ? `<button type="button" class="btn btn-danger btn-tiny" data-admin-del="${escapeAttr(String(editKey))}">Borrar</button>` : ""}
+    </td>`;
+  }
+
+  function renderAdminTable() {
+    const table = $("adminTable");
+    if (!table || !admin.data) return;
+    const tab = admin.tab;
+    const q = (admin.filter || "").toLowerCase();
+    const match = (s) => !q || String(s || "").toLowerCase().includes(q);
+
+    if (tab === "usuarios") {
+      table.innerHTML = `<thead><tr><th>Usuario</th><th>PIN</th><th>Activo</th><th>Admin</th><th>Notas</th><th></th></tr></thead><tbody>${
+        (admin.data.usuarios || []).map((u) => `<tr>
+          <td>${escapeHtml(u.nombre)}</td><td>${escapeHtml(u.pin)}</td>
+          <td>${u.activo !== false ? "Sí" : "No"}</td><td>${u.admin ? "Sí" : "No"}</td>
+          <td>${escapeHtml(u.notas || "")}</td>${btnsRow(u.nombre, true)}
+        </tr>`).join("")
+      }</tbody>`;
+      return;
+    }
+    if (tab === "tipos") {
+      table.innerHTML = `<thead><tr><th>Nombre</th><th>Clase</th><th>Nº</th><th>Asunto</th><th>Activo</th><th></th></tr></thead><tbody>${
+        (admin.data.tipos || []).map((t) => `<tr>
+          <td>${escapeHtml(t.nombre)}${t.sistema ? " · sistema" : ""}</td>
+          <td>${escapeHtml(t.clase)}</td>
+          <td>${t.requiereNumero ? "Sí" : "No"}</td>
+          <td>${t.requiereAsunto !== false ? "Sí" : "No"}</td>
+          <td>${t.activo !== false ? "Sí" : "No"}</td>
+          ${btnsRow(t.nombre, !t.sistema)}
+        </tr>`).join("")
+      }</tbody>`;
+      return;
+    }
+    if (tab === "tickets") {
+      const rows = (admin.data.tickets || []).filter((t) => match(t.numero) || match(t.caso) || match(t.usuario) || match(t.fecha));
+      table.innerHTML = `<thead><tr><th>Fecha</th><th>Hora</th><th>Usuario</th><th>Nº</th><th>Caso</th><th>Min</th><th>Estado</th><th></th></tr></thead><tbody>${
+        rows.map((t) => `<tr>
+          <td>${escapeHtml(t.fecha)}</td><td>${escapeHtml(t.hora || "")}</td>
+          <td>${escapeHtml(t.usuario)}</td><td>#${escapeHtml(t.numero || "")}</td>
+          <td>${escapeHtml(t.caso || "")}</td><td>${t.minutos}</td>
+          <td>${escapeHtml(t.estado || "")}</td>${btnsRow(t.id, true)}
+        </tr>`).join("") || `<tr><td colspan="8">Sin registros</td></tr>`
+      }</tbody>`;
+      return;
+    }
+    if (tab === "actividades") {
+      const rows = (admin.data.actividades || []).filter((t) => match(t.tipo) || match(t.asunto) || match(t.usuario) || match(t.fecha));
+      table.innerHTML = `<thead><tr><th>Fecha</th><th>Hora</th><th>Usuario</th><th>Tipo</th><th>Asunto</th><th>Min</th><th></th></tr></thead><tbody>${
+        rows.map((t) => `<tr>
+          <td>${escapeHtml(t.fecha)}</td><td>${escapeHtml(t.hora || "")}</td>
+          <td>${escapeHtml(t.usuario)}</td><td>${escapeHtml(t.tipo)}</td>
+          <td>${escapeHtml(t.asunto || "")}</td><td>${t.minutos}</td>
+          ${btnsRow(t.id, true)}
+        </tr>`).join("") || `<tr><td colspan="7">Sin registros</td></tr>`
+      }</tbody>`;
+      return;
+    }
+    if (tab === "jornada") {
+      table.innerHTML = `<thead><tr><th>Día</th><th>Minutos</th><th>Horas</th><th>Activo</th><th></th></tr></thead><tbody>${
+        (admin.data.jornada || []).map((j) => `<tr>
+          <td>${escapeHtml(j.dia)}</td><td>${j.minutos}</td><td>${j.horas}</td>
+          <td>${j.activo !== false ? "Sí" : "No"}</td>
+          ${btnsRow(j.codigo, false)}
+        </tr>`).join("")
+      }</tbody>`;
+      return;
+    }
+    table.innerHTML = `<thead><tr><th>Parámetro</th><th>Valor</th><th>Unidad</th><th>Descripción</th><th></th></tr></thead><tbody>${
+      (admin.data.config || []).map((c) => `<tr>
+        <td>${escapeHtml(c.parametro)}</td><td>${escapeHtml(c.valor)}</td>
+        <td>${escapeHtml(c.unidad || "")}</td><td>${escapeHtml(c.descripcion || "")}</td>
+        ${btnsRow(c.parametro, c.parametro !== "Zona_Horaria" && c.parametro !== "Meta_Semanal_Min")}
+      </tr>`).join("")
+    }</tbody>`;
+  }
+
+  function renderAdmin() {
+    const body = $("adminBody");
+    const logout = $("btnAdminLogout");
+    if (!body) return;
+    body.classList.toggle("is-hidden", !adminUnlocked());
+    if (logout) logout.classList.toggle("is-hidden", !adminUnlocked());
+    if (!adminUnlocked()) return;
+    document.querySelectorAll("#adminTabs .admin-tab").forEach((btn) => {
+      btn.classList.toggle("is-on", btn.getAttribute("data-tab") === admin.tab);
+    });
+    let filter = $("adminFilter");
+    if (admin.tab === "tickets" || admin.tab === "actividades") {
+      if (!filter) {
+        const wrap = document.createElement("div");
+        wrap.className = "form-row";
+        wrap.innerHTML = `<label class="grow">Filtrar<input id="adminFilter" placeholder="Nº, nombre, usuario…" /></label>`;
+        $("formAdminEdit").before(wrap);
+        filter = $("adminFilter");
+        filter.addEventListener("input", () => {
+          admin.filter = filter.value;
+          renderAdminTable();
+        });
+      }
+      filter.closest(".form-row").classList.remove("is-hidden");
+    } else if (filter) {
+      filter.closest(".form-row").classList.add("is-hidden");
+    }
+    renderAdminEditor();
+    renderAdminTable();
+  }
+
+  function collectAdminDatos() {
+    const tab = admin.tab;
+    if (tab === "usuarios") {
+      return {
+        clave: ($("admClave") && $("admClave").value) || "",
+        nombre: $("admNombre").value.trim(),
+        pin: $("admPinUser").value.trim(),
+        notas: $("admNotas").value.trim(),
+        activo: $("admActivo").checked,
+        admin: $("admEsAdmin").checked,
+      };
+    }
+    if (tab === "tipos") {
+      return {
+        clave: ($("admClave") && $("admClave").value) || "",
+        nombre: $("admNombre").value.trim(),
+        clase: $("admClase").value,
+        requiereNumero: $("admReqNum").checked,
+        requiereAsunto: $("admReqAsunto").checked,
+        activo: $("admActivo").checked,
+      };
+    }
+    if (tab === "tickets") {
+      return {
+        id: $("admId").value,
+        fecha: $("admFecha").value,
+        usuario: $("admUsuario").value,
+        numero: $("admNumero").value,
+        caso: $("admCaso").value,
+        minutos: $("admMinutos").value,
+        hora: $("admHora").value,
+        estado: $("admEstado").value,
+        observaciones: $("admObs").value,
+      };
+    }
+    if (tab === "actividades") {
+      return {
+        id: $("admId").value,
+        fecha: $("admFecha").value,
+        usuario: $("admUsuario").value,
+        tipo: $("admTipoAct").value,
+        asunto: $("admAsunto").value,
+        minutos: $("admMinutos").value,
+        hora: $("admHora").value,
+      };
+    }
+    if (tab === "jornada") {
+      return {
+        codigo: $("admCodigo").value,
+        dia: $("admDia").value,
+        minutos: $("admMinutos").value,
+        activo: $("admActivo").checked,
+      };
+    }
+    return {
+      clave: ($("admClave") && $("admClave").value) || "",
+      parametro: $("admParam").value.trim(),
+      valor: $("admValor").value,
+      unidad: $("admUnidad").value,
+      descripcion: $("admDesc").value,
+    };
+  }
+
+  async function onAdminUnlock(e) {
+    e.preventDefault();
+    const pin = $("adminPin").value.trim();
+    if (!pin) return;
+    admin.pin = pin;
+    setAdminMsg("Comprobando…", "");
+    try {
+      if (writeMode() !== "gas" && !isAdminUser(userFromPin(pin))) {
+        admin.pin = "";
+        setAdminMsg("Solo el PIN admin puede entrar.", "err");
+        return;
+      }
+      const result = await adminCall({ accion: "listar" });
+      if (!applyAdminResult(result, true)) {
+        admin.pin = "";
+        admin.data = null;
+        return;
+      }
+      sessionStorage.setItem(ADMIN_PIN_KEY, pin);
+      setAdminMsg("Administración desbloqueada.", "ok");
+    } catch (err) {
+      admin.pin = "";
+      admin.data = null;
+      setAdminMsg(String(err.message || err), "err");
+    }
+  }
+
+  function onAdminLogout() {
+    admin.pin = "";
+    admin.data = null;
+    admin.editKey = null;
+    sessionStorage.removeItem(ADMIN_PIN_KEY);
+    if ($("adminPin")) $("adminPin").value = "";
+    setAdminMsg("Sesión admin cerrada.", "");
+    renderAdmin();
+  }
+
+  async function onAdminSave(e) {
+    e.preventDefault();
+    const datos = collectAdminDatos();
+    setAdminMsg("Guardando…", "");
+    try {
+      const result = await adminCall({ accion: "guardar", tabla: admin.tab, datos });
+      applyAdminResult(result);
+    } catch (err) {
+      setAdminMsg(String(err.message || err), "err");
+    }
+  }
+
+  async function onAdminDelete(key) {
+    if (!confirm("¿Borrar este registro del Sheet? No se puede deshacer.")) return;
+    const datos = admin.tab === "tickets" || admin.tab === "actividades" ? { id: key } : { clave: key };
+    setAdminMsg("Eliminando…", "");
+    try {
+      const result = await adminCall({ accion: "borrar", tabla: admin.tab, datos });
+      applyAdminResult(result);
+    } catch (err) {
+      setAdminMsg(String(err.message || err), "err");
+    }
+  }
+
+  function setupAdmin() {
+    if (!$("adminPanel")) return;
+    $("formAdminLock").addEventListener("submit", onAdminUnlock);
+    $("btnAdminLogout").addEventListener("click", onAdminLogout);
+    $("formAdminEdit").addEventListener("submit", onAdminSave);
+    $("adminTabs").addEventListener("click", (ev) => {
+      const tab = ev.target.closest("[data-tab]");
+      if (!tab) return;
+      admin.tab = tab.getAttribute("data-tab");
+      admin.editKey = null;
+      admin.filter = "";
+      const f = $("adminFilter");
+      if (f) f.value = "";
+      renderAdmin();
+    });
+    $("adminPanel").addEventListener("click", (ev) => {
+      const edit = ev.target.closest("[data-admin-edit]");
+      if (edit) {
+        admin.editKey = edit.getAttribute("data-admin-edit");
+        renderAdmin();
+        $("formAdminEdit").scrollIntoView({ block: "nearest" });
+        return;
+      }
+      const del = ev.target.closest("[data-admin-del]");
+      if (del) onAdminDelete(del.getAttribute("data-admin-del"));
+      if (ev.target.id === "btnAdminCancel") {
+        admin.editKey = null;
+        renderAdmin();
+      }
+    });
+    const saved = sessionStorage.getItem(ADMIN_PIN_KEY);
+    if (saved) {
+      $("adminPin").value = saved;
+    }
+  }
+
+  async function onSubmit(e) {
+    e.preventDefault();
+    const msg = $("formMsg");
+    msg.textContent = "";
+    msg.className = "form-msg";
+
+    const tipoActividad = $("regTipo").value;
+    const t = findTipo(tipoActividad);
+    const pin = $("regPin").value.trim();
+    const usuario = userFromPin(pin);
+    const payload = {
+      tipoActividad,
+      usuario,
+      pin,
+      minutos: Number($("regMinutos").value),
+      timestamp: new Date().toISOString(),
+    };
+
+    if (t.requiereNumero) {
+      payload.numeroTicket = $("regNumero").value.trim().replace(/^#/, "");
+      payload.nombreCaso = $("regCaso").value.trim();
+      payload.estado = ($("regEstado") && $("regEstado").value) || "Abierto";
+      payload.observaciones = ($("regObservaciones") && $("regObservaciones").value.trim()) || "";
+    } else {
+      payload.asunto = $("regAsunto").value.trim();
+    }
+
+    if (!payload.pin || !payload.minutos) {
+      msg.textContent = "PIN y minutos son obligatorios.";
+      msg.classList.add("err");
+      return;
+    }
+    if (writeMode() !== "gas" && !usuario) {
+      msg.textContent = "PIN no reconocido.";
+      msg.classList.add("err");
+      return;
+    }
+
+    $("btnSubmit").classList.add("is-loading");
+    try {
+      const result = await postRegistro(payload);
+      msg.textContent = result.mensaje || `Guardado como ${result.usuario || usuario}.`;
+      msg.classList.add("ok");
+      $("regPin").value = "";
+      if ($("regObservaciones")) $("regObservaciones").value = "";
+      const hint = $("pinUserHint");
+      if (hint) hint.textContent = `Último registro: ${result.usuario || usuario}`;
+      if (dataMode() === "api" || dataMode() === "gas") await refresh();
+      else renderAll();
+    } catch (err) {
+      msg.textContent = err.message;
+      msg.classList.add("err");
+    } finally {
+      $("btnSubmit").classList.remove("is-loading");
+    }
+  }
+
+  function tickClock() {
+    const d = nowInBogota();
+    $("clockLabel").textContent = `${isoDate(d)} · ${isoTime(d)} (COT)`;
+  }
+
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function escapeAttr(s) {
+    return escapeHtml(s).replace(/'/g, "&#39;");
+  }
+
+  function currentTheme() {
+    return document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+  }
+
+  function applyTheme(theme, persist) {
+    const t = theme === "light" ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", t);
+    document.documentElement.style.colorScheme = t;
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute("content", t === "light" ? "#f3f6fb" : "#070B14");
+    const btn = $("btnTheme");
+    if (btn) {
+      const next = t === "light" ? "oscuro" : "claro";
+      btn.setAttribute("aria-label", "Cambiar a tema " + next);
+      btn.title = "Tema " + next;
+      btn.setAttribute("aria-pressed", t === "light" ? "true" : "false");
+    }
+    if (persist) {
+      try { localStorage.setItem("jb_time_theme", t); } catch (e) {}
+      try { renderAll(); } catch (e) {}
+    }
+  }
+
+  function setupTheme() {
+    let t = "dark";
+    try {
+      t = localStorage.getItem("jb_time_theme") || document.documentElement.getAttribute("data-theme") || t;
+    } catch (e) {
+      t = document.documentElement.getAttribute("data-theme") || t;
+    }
+    applyTheme(t === "light" ? "light" : "dark", false);
+    const btn = $("btnTheme");
+    if (btn) {
+      btn.addEventListener("click", () => {
+        applyTheme(currentTheme() === "light" ? "dark" : "light", true);
+      });
+    }
+  }
+
+  function init() {
+    tickClock();
+    setInterval(tickClock, 30000);
+    $("btnRefresh").addEventListener("click", refresh);
+    $("filterUser").addEventListener("change", renderAll);
+    $("regTipo").addEventListener("change", toggleFormFields);
+    $("formRegistro").addEventListener("submit", onSubmit);
+    if ($("regNumero")) $("regNumero").addEventListener("blur", completarNombreCaso);
+    if ($("formConsulta")) $("formConsulta").addEventListener("submit", renderConsulta);
+    if ($("btnCronoStart")) $("btnCronoStart").addEventListener("click", cronoStart);
+    if ($("btnCronoStop")) $("btnCronoStop").addEventListener("click", cronoStop);
+    if ($("btnCronoReset")) $("btnCronoReset").addEventListener("click", cronoReset);
+    if (cronoState().running) startCronoTick();
+    renderCrono();
+    setupTheme();
+    setupStayAwake();
+    setupWriteUI();
+    setupAdmin();
+    refresh();
+  }
+
+  document.addEventListener("DOMContentLoaded", init);
+})();
+
+</script>
